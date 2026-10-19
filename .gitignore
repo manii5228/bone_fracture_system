@@ -1,0 +1,42 @@
+# Dataset (large files - not tracked in git)
+bone_fracture_dataset/
+
+# Model weights
+*.pt
+*.pth
+*.weights
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Uploads and outputs
+uploads/
+static/uploads/
+outputs/
+runs/

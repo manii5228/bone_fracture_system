@@ -1,0 +1,13 @@
+# Bone Fracture Detection Dataset
+path: bone_fracture_dataset
+train: images/train
+val: images/val
+
+# Number of classes
+nc: 1
+
+# Class names
+names: ['fracture']
+
+# Download command/description (optional)
+# download: https://example.com/dataset.zip
