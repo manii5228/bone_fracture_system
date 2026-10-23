@@ -2,7 +2,8 @@ from flask import Flask, request, redirect, session, url_for
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-import random
+# NOTE: 'random' is intentionally NOT imported. All confidence values must come
+#       from the trained model (results[0].boxes.conf) or be omitted entirely.
 from datetime import datetime
 
 # === YOLO MODEL IMPORT ===
@@ -532,7 +533,7 @@ def _yolo_detect(image_path):
         boxes = []
         for box in result.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
-            conf = float(box.conf[0])          # ← REAL model confidence
+            conf = float(box.conf[0])          # ← REAL model confidence from results[0].boxes.conf
             x1, y1 = max(0, int(x1)), max(0, int(y1))
             x2, y2 = min(w, int(x2)), min(h, int(y2))
             bw, bh = x2 - x1, y2 - y1
@@ -541,7 +542,8 @@ def _yolo_detect(image_path):
             boxes.append({
                 'x': x1, 'y': y1, 'width': bw, 'height': bh,
                 'confidence': round(conf, 2),
-                'label': f"Fracture {conf*100:.1f}%"
+                'label': f"Fracture candidate — {conf*100:.1f}% model confidence",
+                'source': 'yolo'
             })
         return boxes if boxes else None
     except Exception as e:
@@ -570,16 +572,19 @@ def detect_fracture(image_path):
         source = "YOLOv8"
 
         # --- Stage 2: OpenCV fallback pipeline ---
+        # IMPORTANT: boxes produced here are geometry-based heuristics, NOT model predictions.
+        # They must never be labelled as fracture detections or carry a model confidence score.
         if fracture_boxes is None:
-            source = "OpenCV"
-            print("ℹ️  YOLOv8 unavailable — using OpenCV bone segmentation pipeline.")
+            source = "OpenCV-heuristic"
+            print("ℹ️  YOLOv8 returned no detections — running OpenCV bone-area heuristic "
+                  "(results are visualisation only, not model predictions).")
             bone_areas = improved_bone_detection(gray)
 
             if not bone_areas:
                 print("❌ No bone areas found")
                 return no_fracture_result(image_path)
 
-            print(f"🦴 Found {len(bone_areas)} bone areas (OpenCV)")
+            print(f"🦴 Found {len(bone_areas)} bone areas (OpenCV heuristic)")
             fracture_boxes = []
 
             for bone in bone_areas:
@@ -590,32 +595,38 @@ def detect_fracture(image_path):
                     center_y   = bone['y'] + bone['height'] // 2
                     x = max(10, min(center_x - box_width // 2,  width  - box_width  - 10))
                     y = max(10, min(center_y - box_height // 2, height - box_height - 10))
-                    # OpenCV pipeline has no model confidence — use a fixed default
-                    confidence = 0.75
+                    # Heuristic boxes carry no model confidence — confidence is explicitly None.
                     fracture_boxes.append({
                         'x': x, 'y': y, 'width': box_width, 'height': box_height,
-                        'label': f"Fracture {confidence*100:.1f}% (CV)",
-                        'confidence': confidence
+                        'label': 'Region of interest (heuristic — not a model prediction)',
+                        'confidence': None,
+                        'source': 'opencv-heuristic'
                     })
-                    print(f"📍 OpenCV box at ({x}, {y})")
+                    print(f"📍 OpenCV heuristic region at ({x}, {y})")
 
         if fracture_boxes:
-            print(f"✅ FRACTURE DETECTED via {source} — {len(fracture_boxes)} location(s)")
-            fracture_type   = classify_fracture_location(fracture_boxes, width, height)
+            print(f"✅ FRACTURE CANDIDATE(S) returned via {source} — {len(fracture_boxes)} location(s)")
             output_image    = add_bounding_boxes(image_path, fracture_boxes)
-            mean_confidence = round(
-                sum(b['confidence'] for b in fracture_boxes) / len(fracture_boxes), 2
-            )
+            # Confidence: mean of real model scores for YOLO boxes; None for heuristic boxes.
+            yolo_boxes = [b for b in fracture_boxes if b.get('source') == 'yolo']
+            if yolo_boxes:
+                mean_confidence = round(
+                    sum(b['confidence'] for b in yolo_boxes) / len(yolo_boxes), 2
+                )
+            else:
+                mean_confidence = None  # Heuristic boxes have no valid model confidence
             return {
-                'fracture_type':    fracture_type,
-                'severity':         min(9, len(fracture_boxes) + 4),
-                'confidence':       mean_confidence,   # ← mean of REAL model confidences
-                'bounding_boxes':   fracture_boxes,
-                'processed_image':  output_image,
-                'fracture_detected': True
+                # fracture_type and severity are intentionally omitted:
+                #   - fracture_type requires a multi-class model or anatomical region model
+                #   - severity requires a clinically validated label definition
+                'confidence':        mean_confidence,
+                'bounding_boxes':    fracture_boxes,
+                'processed_image':   output_image,
+                'fracture_detected': True,
+                'detection_source':  source,
             }
         else:
-            print("✅ NO FRACTURE detected")
+            print("✅ No fracture candidate returned above threshold")
             return no_fracture_result(image_path)
 
     except Exception as e:
@@ -671,38 +682,34 @@ def improved_bone_detection(gray_image):
         print(f"⚠️ Error in improved_bone_detection: {e}")
         return []
 
-def classify_fracture_location(boxes, width, height):
-    """Classify fracture based on location in image"""
-    fracture_types = ['Radius Fracture', 'Ulna Fracture', 'Tibia Fracture', 
-                     'Fibula Fracture', 'Femur Fracture', 'Humerus Fracture']
-    
-    if not boxes:
-        return random.choice(fracture_types)
-    
-    # Simple location-based classification
-    avg_y = sum(box['y'] for box in boxes) / len(boxes)
-    
-    if avg_y > height * 0.6:  # Bottom of image
-        return random.choice(['Radius Fracture', 'Ulna Fracture'])  # Wrist
-    elif avg_y > height * 0.3:  # Middle
-        return random.choice(['Tibia Fracture', 'Fibula Fracture'])  # Leg
-    else:  # Top
-        return random.choice(['Femur Fracture', 'Humerus Fracture'])  # Upper body
+# classify_fracture_location() has been removed.
+# Anatomical bone-type classification (radius, ulna, tibia, fibula, femur, humerus)
+# requires either:
+#   (a) a multi-class detector trained on per-bone labelled data, or
+#   (b) a validated anatomical-region segmentation model.
+# Inferring bone type from the Y-coordinate of a bounding box is not reliable
+# because image content depends on anatomy, projection, rotation, and crop.
+# This function must not be re-added without a validated replacement.
 
 def no_fracture_result(image_path):
     """
-    Return a standardized result for images where no fracture is detected.
-    Confidence is reported as a fixed high-confidence negative (0.95).
-    If YOLOv8 is loaded, the absence of predictions already represents a
-    confident negative from the model.
+    Return a standardized result for images where the detector returned no
+    candidates above the configured confidence threshold.
+
+    NOTE: A negative result does NOT certify that the image is fracture-free.
+    The absence of a detection at the current threshold and model version does
+    not exclude fracture — a clinician must independently review the image.
+    No model-confidence value is fabricated here.
     """
     return {
-        'fracture_type': 'No Fracture Detected',
-        'severity': 0,
-        'confidence': 0.95,   # Deterministic — not random
-        'bounding_boxes': [],
-        'processed_image': os.path.basename(image_path),
-        'fracture_detected': False
+        # fracture_type and severity are omitted — they are not valid outputs
+        # when the model returns no detections.
+        # confidence is intentionally None — no score is fabricated for negatives.
+        'confidence':        None,
+        'bounding_boxes':    [],
+        'processed_image':   os.path.basename(image_path),
+        'fracture_detected': False,
+        'detection_source':  'none',
     }
 
 def add_bounding_boxes(image_path, bounding_boxes):
@@ -897,14 +904,14 @@ def login():
                             <div style="background: linear-gradient(135deg, #f8fafc, #e0f2fe); padding: 3rem; border-radius: 20px; border: 1px solid var(--border);">
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem;">
                                     <div style="background: white; padding: 1.5rem; border-radius: 12px; box-shadow: var(--shadow);">
-                                        <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">📊</div>
-                                        <div style="font-weight: 600; color: var(--primary);">max90.7% Accuracy</div>
-                                        <div style="font-size: 0.8rem; color: var(--gray);">Clinical Validation</div>
+                                        <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🤖</div>
+                                        <div style="font-weight: 600; color: var(--primary);">YOLOv8 Detection</div>
+                                        <div style="font-size: 0.8rem; color: var(--gray);">Fracture Candidate Localization</div>
                                     </div>
                                     <div style="background: white; padding: 1.5rem; border-radius: 12px; box-shadow: var(--shadow);">
-                                        <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">⚡</div>
-                                        <div style="font-weight: 600; color: var(--primary);">30 Seconds</div>
-                                        <div style="font-size: 0.8rem; color: var(--gray);">Average Analysis</div>
+                                        <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🏥</div>
+                                        <div style="font-weight: 600; color: var(--primary);">Physician Review</div>
+                                        <div style="font-size: 0.8rem; color: var(--gray);">Clinical Decision Required</div>
                                     </div>
                                 </div>
                                 
@@ -913,19 +920,19 @@ def login():
                                     <div style="display: grid; gap: 1rem; text-align: left;">
                                         <div style="display: flex; align-items: start; gap: 0.75rem;">
                                             <span style="color: var(--secondary); font-size: 1.2rem;">•</span>
-                                            <span>Real-time fracture detection with YOLO algorithm</span>
+                                            <span>Real-time fracture candidate detection with YOLOv8</span>
                                         </div>
                                         <div style="display: flex; align-items: start; gap: 0.75rem;">
                                             <span style="color: var(--secondary); font-size: 1.2rem;">•</span>
-                                            <span>HIPAA compliant data security</span>
+                                            <span>Patient and physician role-separated workflows</span>
                                         </div>
                                         <div style="display: flex; align-items: start; gap: 0.75rem;">
                                             <span style="color: var(--secondary); font-size: 1.2rem;">•</span>
-                                            <span>Board-certified radiologist validation</span>
+                                            <span>AI output separated from physician clinical assessment</span>
                                         </div>
                                         <div style="display: flex; align-items: start; gap: 0.75rem;">
                                             <span style="color: var(--secondary); font-size: 1.2rem;">•</span>
-                                            <span>Multi-fracture pattern recognition</span>
+                                            <span>Decision support prototype — physician review required</span>
                                         </div>
                                     </div>
                                 </div>
@@ -1236,7 +1243,8 @@ def upload_xray():
                 
                 print(f"✅ Detection result: Fracture detected: {detection_result['fracture_detected']}")
                 
-                # Save report
+                # Save report — fracture_type and severity are no longer stored;
+                # confidence is None unless the model returned a valid score.
                 report_id = len(reports) + 1
                 reports.append({
                     'id': report_id,
@@ -1244,22 +1252,41 @@ def upload_xray():
                     'doctor_id': int(doctor_id),
                     'image_path': filename,
                     'processed_image_path': detection_result['processed_image'],
-                    'fracture_type': detection_result['fracture_type'],
-                    'severity': detection_result['severity'],
-                    'confidence': detection_result['confidence'],
+                    'confidence': detection_result['confidence'],       # None or real model score
                     'fracture_detected': detection_result['fracture_detected'],
                     'bounding_boxes': detection_result['bounding_boxes'],
+                    'detection_source': detection_result.get('detection_source', 'unknown'),
                     'upload_date': datetime.now().strftime('%Y-%m-%d %H:%M')
                 })
                 
-                # Show result message
+                # Build the result message and confidence display
+                det_source = detection_result.get('detection_source', '')
+                conf_val = detection_result['confidence']
                 if detection_result['fracture_detected']:
                     result_class = 'fracture-positive'
-                    result_message = f"🦴 Fracture Detected: {detection_result['fracture_type']}"
+                    result_message = '\U0001f9b4 Fracture Candidate Detected'
+                    if det_source == 'OpenCV-heuristic':
+                        source_note = (
+                            '\u26a0\ufe0f This region was identified by an OpenCV geometry heuristic, '
+                            'NOT by the trained model. It must not be interpreted as a fracture diagnosis.'
+                        )
+                    else:
+                        source_note = 'Detected by YOLOv8 trained detector.'
                 else:
                     result_class = 'fracture-negative'
-                    result_message = "✅ No Fracture Detected - Bone appears healthy"
-                
+                    result_message = '\u26a0\ufe0f No candidate returned above threshold'
+                    source_note = (
+                        'No fracture candidate was returned at the current confidence threshold. '
+                        'This does NOT exclude fracture. A clinician must review the image independently.'
+                    )
+
+                if conf_val is not None:
+                    conf_display = f'{conf_val*100:.1f}% (model score)'
+                else:
+                    conf_display = 'N/A \u2014 no model score available'
+
+                n_boxes = len(detection_result['bounding_boxes'])
+
                 return f'''
                 <!DOCTYPE html>
                 <html>
@@ -1272,32 +1299,41 @@ def upload_xray():
                     <div style="min-height: 100vh; padding: 2rem;">
                         <div class="medical-container">
                             <div class="medical-header">
-                                <h1>🎯 Analysis Complete</h1>
+                                <h1>\U0001f3af Analysis Complete</h1>
                                 <p>AI-Powered X-Ray Assessment</p>
                             </div>
-                            
+
                             <div class="medical-content">
+                                <!-- Mandatory disclaimer -->
+                                <div style="background:#fff3cd;border-left:4px solid #d97706;padding:1.25rem 1.5rem;
+                                            border-radius:12px;margin-bottom:1.5rem;font-size:0.95rem;">
+                                    <strong>\u26a0\ufe0f AI Decision Support &mdash; Not a clinical diagnosis.</strong><br>
+                                    This output is generated by an AI prototype and must be reviewed by a
+                                    qualified physician before any clinical decision is made.
+                                    A negative result does not exclude fracture.
+                                </div>
+
                                 <div class="{result_class}">
                                     <h3 style="margin-top: 0; margin-bottom: 1rem; font-size: 1.5rem;">{result_message}</h3>
                                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem;">
-                                        <div><strong>Fracture Type:</strong> {detection_result['fracture_type']}</div>
-                                        <div><strong>Severity Level:</strong> {detection_result['severity']}/10</div>
-                                        <div><strong>AI Confidence:</strong> {detection_result['confidence']*100:.1f}%</div>
-                                        <div><strong>Fractures Detected:</strong> {len(detection_result['bounding_boxes'])} location(s)</div>
+                                        <div><strong>Candidates Found:</strong> {n_boxes} location(s)</div>
+                                        <div><strong>Model Confidence:</strong> {conf_display}</div>
+                                        <div><strong>Detection Source:</strong> {det_source}</div>
                                     </div>
+                                    <p style="margin-top:1rem;font-size:0.9rem;opacity:0.85;">{source_note}</p>
                                 </div>
-                                
+
                                 <div class="xray-preview">
-                                    <img src="/static/uploads/{detection_result['processed_image']}" 
+                                    <img src="/static/uploads/{detection_result['processed_image']}"
                                          alt="X-Ray Analysis Result">
                                     <p style="color: var(--gray); margin-top: 1rem; font-style: italic;">
-                                        {'🔴 Red bounding boxes indicate detected fracture locations' if detection_result['fracture_detected'] else '✅ No fractures detected - bone structure appears healthy'}
+                                        {'\U0001f534 Boxes on image are AI-generated regions of interest &mdash; physician review required' if detection_result['fracture_detected'] else '\u2705 No candidate returned at current threshold'}
                                     </p>
                                 </div>
-                                
+
                                 <div style="text-align: center; margin-top: 2rem;">
-                                    <a href="/patient_dashboard" class="medical-btn">📊 Back to Dashboard</a>
-                                    <a href="/view_reports" class="medical-btn secondary">📋 View All Reports</a>
+                                    <a href="/patient_dashboard" class="medical-btn">\U0001f4ca Back to Dashboard</a>
+                                    <a href="/view_reports" class="medical-btn secondary">\U0001f4cb View All Reports</a>
                                 </div>
                             </div>
                         </div>
@@ -1400,9 +1436,8 @@ def view_reports():
                         'patient_name': patient_name,
                         'image_path': report['image_path'],
                         'processed_image_path': report.get('processed_image_path', report['image_path']),
-                        'fracture_type': report['fracture_type'],
-                        'severity': report['severity'],
-                        'confidence': report['confidence'],
+                        'confidence': report.get('confidence'),           # None or real model score
+                        'detection_source': report.get('detection_source', 'unknown'),
                         'fracture_detected': report.get('fracture_detected', False),
                         'upload_date': report['upload_date']
                     })
@@ -1437,10 +1472,9 @@ def view_reports():
                             <div class="{'fracture-positive' if report['fracture_detected'] else 'fracture-negative'}">
                                 <h4 style="margin-top: 0;">🦴 AI Detection Results</h4>
                                 <div style="display: grid; gap: 0.75rem;">
-                                    <div><strong>Fracture Detected:</strong> {'Yes' if report['fracture_detected'] else 'No'}</div>
-                                    <div><strong>Fracture Type:</strong> {report['fracture_type']}</div>
-                                    <div><strong>Severity:</strong> <span style="color: {'var(--danger)' if report['severity'] > 5 else 'var(--secondary)'}">{report['severity']}/10</span></div>
-                                    <div><strong>Confidence:</strong> <span style="color: var(--primary)">{report['confidence']*100:.1f}%</span></div>
+                                    <div><strong>AI Candidate:</strong> {'Yes' if report['fracture_detected'] else 'No'}</div>
+                                    <div><strong>Model Confidence:</strong> {f"{report['confidence']*100:.1f}% (model)" if report.get('confidence') is not None else 'N/A &mdash; no model score'}</div>
+                                    <div><strong>Detection Source:</strong> {report.get('detection_source', 'unknown')}</div>
                                     <div><strong>Upload Date:</strong> {report['upload_date']}</div>
                                 </div>
                             </div>
@@ -1535,11 +1569,9 @@ def view_reports():
                             <div class="{'fracture-positive' if report.get('fracture_detected', False) else 'fracture-negative'}">
                                 <h4 style="margin-top: 0;">🦴 AI Detection Results</h4>
                                 <div style="display: grid; gap: 0.75rem;">
-                                    <div><strong>Fracture Detected:</strong> {'Yes' if report.get('fracture_detected', False) else 'No'}</div>
-                                    <div><strong>Fracture Type:</strong> {report['fracture_type']}</div>
-                                    <div><strong>Severity:</strong> <span style="color: {'var(--danger)' if report['severity'] > 5 else 'var(--secondary)'}">{report['severity']}/10</span></div>
-                                    <div><strong>Confidence:</strong> <span style="color: var(--primary)">{report['confidence']*100:.1f}%</span></div>
-                                    <div><strong>Medical Professional:</strong> Dr. {doctor_name} - {doctor_spec}</div>
+                                    <div><strong>AI Candidate:</strong> {'Yes' if report.get('fracture_detected', False) else 'No'}</div>
+                                    <div><strong>Model Confidence:</strong> {f"{report['confidence']*100:.1f}% (model)" if report.get('confidence') is not None else 'N/A &mdash; no model score'}</div>
+                                    <div><strong>Medical Professional:</strong> Dr. {doctor_name} &mdash; {doctor_spec}</div>
                                     <div><strong>Analysis Date:</strong> {report['upload_date']}</div>
                                 </div>
                             </div>
