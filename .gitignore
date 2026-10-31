@@ -1,12 +1,26 @@
-# Dataset (large files - not tracked in git)
-bone_fracture_dataset/
+# ============================================================
+# .gitignore for MedScan AI Bone Fracture Detection System
+# ============================================================
 
-# Model weights
+# ── Dataset (large binary files – do NOT commit) ─────────────
+bone_fracture_dataset/
+datasets/
+data/
+
+# ── Model weights & checkpoints ──────────────────────────────
 *.pt
 *.pth
 *.weights
+*.onnx
+*.tflite
+models/
 
-# Python
+# ── YOLO / Ultralytics training outputs ──────────────────────
+runs/
+quick_train/
+*.cache
+
+# ── Python bytecode ──────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -17,33 +31,58 @@ dist/
 build/
 .eggs/
 
-# Virtual environments
+# ── Virtual environments ─────────────────────────────────────
 venv/
 .venv/
 env/
+ENV/
 .env
 
-# IDE
+# ── IDE / Editor ─────────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# OS
+# ── OS artefacts ─────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Logs
+# ── Logs ─────────────────────────────────────────────────────
 *.log
 logs/
 
-# Uploads and outputs
+# ── Flask / App uploads & outputs ────────────────────────────
 uploads/
 static/uploads/
 outputs/
-runs/
+detected_images/
 
-ppts/
+# ── Generated paper figures & results ────────────────────────
+figures/
+results/
 
-changes need to be done.md
+# ── One-off helper scripts (not part of the app) ─────────────
+auto_fill_paper.py
+auto_fill_paper_v2.py
+fix_val_split.py
+remap_and_eval.py
+quick_train.py
+patch_figures.py
+generate_figures.py
+generate_confusion_matrix.py
+
+# ── Paper drafts & presentation files ────────────────────────
 IEEE_Paper_Draft_v2.tex
-venv
+IEEE_Paper_Draft_v2.tex.bak
 IEEE_Paper_Draft_v2.md
+IEEE_Paper_Draft.md
+ppts/
+"changes need to be done.md"
+
+# ── Misc ─────────────────────────────────────────────────────
+*.zip
+*.tar.gz
+RESUME*.pdf
+
